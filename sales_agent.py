@@ -1,8 +1,10 @@
 import asyncio
 import os
-from dotenv import load_dotenv
-from typing import Any, Literal
+import logging
+from typing import Any, Literal, Dict, Optional
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
 from agentscope.agent import AgentBase, ReActAgent, UserAgent
 from agentscope.formatter import (
     GeminiChatFormatter,
@@ -14,28 +16,27 @@ from agentscope.model import GeminiChatModel
 from agentscope.pipeline import MsgHub
 from agentscope.tool import Toolkit, ToolResponse
 
-# --- Part 2: Structured Output Models ---
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("SalesAgentSystem")
+
+# --- Models ---
 
 class RouteDecision(BaseModel):
     """Structured output for routing decisions."""
     category: Literal["technical", "order", "complaint", "general"] = Field(
-        description=(
-            "Issue category: technical (technical issues), "
-            "order (order issues), complaint (complaints), "
-            "general (general inquiries)"
-        ),
+        description="Issue category: technical, order, complaint, or general inquiries",
     )
     confidence: float = Field(
         description="Classification confidence, between 0 and 1",
         ge=0,
         le=1,
     )
-    summary: str = Field(
-        description="Brief summary of the issue",
-    )
-    priority: Literal["low", "medium", "high"] = Field(
-        description="Issue priority",
-    )
+    summary: str = Field(description="Brief summary of the issue")
+    priority: Literal["low", "medium", "high"] = Field(description="Issue priority")
 
 class ResolutionReport(BaseModel):
     """Structured output for resolution reports."""
@@ -43,14 +44,13 @@ class ResolutionReport(BaseModel):
     solution: str = Field(description="The solution provided")
     follow_up: str = Field(description="Follow-up action items")
 
-# --- Part 3.2: Tools and Workers ---
+# --- Tools ---
 
 def query_order(order_id: str) -> ToolResponse:
     """Query order status.
     Args:
-        order_id (``str``): The order ID.
+        order_id (str): The order ID.
     """
-    # Simulate order data
     orders = {
         "12345": {"status": "shipped", "eta": "2024-01-20"},
         "67890": {"status": "processing", "eta": "2024-01-22"},
@@ -60,50 +60,43 @@ def query_order(order_id: str) -> ToolResponse:
         content=[TextBlock(type="text", text=f"Order {order_id}: {order}")],
     )
 
-# --- Part 4: Human-in-the-Loop Hook ---
+# --- Hooks ---
 
 async def human_review_post_reply_hook(
     self: AgentBase,
     kwargs: dict[str, Any],
     output: Msg,
-) -> Msg | None:
-    """Post-reply hook: perform manual review after the agent replies."""
+) -> Optional[Msg]:
+    """Post-reply hook for manual review."""
     print("\n" + "=" * 50)
     print("[Manual Review] Agent response:")
     print(f" {output.get_text_content()}")
     print("=" * 50)
     
-    # Use UserAgent to get human input
     human = UserAgent(name="Reviewer")
     review_msg = await human(
         Msg(
             "System",
-            "Please review the above response. Type 'ok' to approve, "
-            "or enter your revision feedback:",
+            "Please review the response. Type 'ok' to approve, or enter feedback:",
             "user",
         ),
     )
     review_text = review_msg.get_text_content().strip()
     
     if review_text.lower() == "ok":
-        print("[Review Approved] Response confirmed.")
+        logger.info("Review approved.")
         return None
     
-    # Review rejected: append feedback to the original message and regenerate
-    print(f"[Review Rejected] Feedback: {review_text}")
+    logger.warning(f"Review rejected. Feedback: {review_text}")
     original_msg = kwargs.get("msg")
     if original_msg is not None:
-        # Temporarily remove the hook to avoid infinite loops
         self.clear_instance_hooks("post_reply")
         revised_msg = Msg(
             original_msg.name,
-            f"{original_msg.get_text_content()}\n\n"
-            f"[Review Feedback] Please revise based on the following "
-            f"feedback: {review_text}",
+            f"{original_msg.get_text_content()}\n\n[Review Feedback]: {review_text}",
             original_msg.role,
         )
         revised_output = await self.reply(revised_msg)
-        # Re-register the hook
         self.register_instance_hook(
             hook_type="post_reply",
             hook_name="human_review",
@@ -112,39 +105,31 @@ async def human_review_post_reply_hook(
         return revised_output
     return None
 
-# --- Part 5: Complete Customer Support System ---
+# --- Main System ---
 
 class CustomerSupportSystem:
-    """Multi-agent customer support system."""
+    """Multi-agent customer support system using AgentScope and Gemini."""
     
-    def __init__(self, enable_human_review: bool = False) -> None:
+    def __init__(self, model_name: str = "gemini-1.5-flash", enable_human_review: bool = False) -> None:
         self.api_key = os.environ.get("GOOGLE_API_KEY")
         if not self.api_key:
-            print("WARNING: GOOGLE_API_KEY not found in environment.")
+            logger.error("GOOGLE_API_KEY not found in environment.")
+            raise ValueError("GOOGLE_API_KEY is required.")
             
-        self.model = GeminiChatModel(
-            model_name="gemini-1.5-flash",
-            api_key=self.api_key,
-        )
+        self.model_name = model_name
         self.enable_human_review = enable_human_review
         
-        # Create the agents
+        # Initialize common model instance
+        self.shared_model = self._init_model(stream=True)
+        self.router_model = self._init_model(stream=False)
+        
+        # Create agents
         self.router = self._create_router()
-        self.tech_agent = self._create_specialist(
-            "technical support",
-            "TechSupport",
-        )
-        self.order_agent = self._create_specialist(
-            "order services",
-            "OrderSupport",
-        )
-        self.complaint_agent = self._create_specialist(
-            "complaint handling",
-            "ComplaintHandler",
-        )
+        self.tech_agent = self._create_specialist("TechSupport", "technical support")
+        self.order_agent = self._create_specialist("OrderSupport", "order services", [query_order])
+        self.complaint_agent = self._create_specialist("ComplaintHandler", "complaint handling")
         self.supervisor = self._create_supervisor()
         
-        # If manual review is enabled, register the hook for the supervisor
         if self.enable_human_review:
             self.supervisor.register_instance_hook(
                 hook_type="post_reply",
@@ -152,129 +137,109 @@ class CustomerSupportSystem:
                 hook=human_review_post_reply_hook,
             )
 
+    def _init_model(self, stream: bool) -> GeminiChatModel:
+        """Initialize a Gemini model instance."""
+        return GeminiChatModel(
+            model_name=self.model_name,
+            api_key=self.api_key,
+            # stream=stream, # GeminiChatModel might not support stream parameter in constructor for some versions
+        )
+
     def _create_router(self) -> ReActAgent:
-        """Create the router agent."""
         return ReActAgent(
             name="Router",
-            sys_prompt="You are an intelligent routing system that analyzes "
-                       "customer issues and classifies them.",
-            model=GeminiChatModel(
-                model_name="gemini-1.5-flash",
-                api_key=self.api_key,
-            ),
+            sys_prompt="You are an intelligent routing system that classifies customer issues.",
+            model=self.router_model,
             formatter=GeminiChatFormatter(),
             memory=InMemoryMemory(),
             toolkit=Toolkit(),
         )
 
-    def _create_specialist(
-        self,
-        specialty: str,
-        name: str,
-    ) -> ReActAgent:
-        """Create a specialized customer support agent."""
+    def _create_specialist(self, name: str, specialty: str, tools: list = None) -> ReActAgent:
         toolkit = Toolkit()
-        if "order" in specialty:
-            toolkit.register_tool_function(query_order)
+        if tools:
+            for tool in tools:
+                toolkit.register_tool_function(tool)
+        
         return ReActAgent(
             name=name,
-            sys_prompt=f"You are a {specialty} specialist, professionally "
-                       f"handling related issues.",
-            model=self.model,
+            sys_prompt=f"You are a {specialty} specialist. Handle issues professionally.",
+            model=self.shared_model,
             formatter=GeminiMultiAgentFormatter(),
             memory=InMemoryMemory(),
             toolkit=toolkit,
         )
 
     def _create_supervisor(self) -> ReActAgent:
-        """Create the supervisor agent."""
         return ReActAgent(
             name="Supervisor",
-            sys_prompt="You are a customer service supervisor, responsible "
-                       "for monitoring service quality and summarizing results.",
-            model=self.model,
+            sys_prompt="You are a supervisor monitoring quality and summarizing results.",
+            model=self.shared_model,
             formatter=GeminiMultiAgentFormatter(),
             memory=InMemoryMemory(),
             toolkit=Toolkit(),
         )
 
-    async def handle_customer(
-        self,
-        customer_id: str,
-        issue: str,
-    ) -> str:
-        """Main workflow for handling customer issues."""
-        print(f"\n{'=' * 60}")
-        print(f"[New Customer Issue] {customer_id}: {issue}")
-        print("=" * 60)
+    async def handle_customer(self, customer_id: str, issue: str) -> str:
+        """Process a customer issue through the multi-agent pipeline."""
+        logger.info(f"Processing issue for {customer_id}: {issue}")
         
-        # Step 1: Route classification
-        route_response = await self.router(
-            Msg("System", f"Analyze this customer issue: {issue}", "user"),
-            structured_model=RouteDecision,
-        )
-        decision = route_response.metadata
-        category = decision.get("category", "general")
-        priority = decision.get("priority", "medium")
-        print(f"\n[Routing Decision] Category: {category}, "
-              f"Priority: {priority}")
-        
-        # Step 2: Assign to a specialist agent
-        specialist_map = {
-            "technical": self.tech_agent,
-            "order": self.order_agent,
-            "complaint": self.complaint_agent,
-            "general": self.tech_agent,
-        }
-        specialist = specialist_map.get(category, self.tech_agent)
-        
-        # Step 3: Multi-agent collaborative handling (MsgHub)
-        async with MsgHub(participants=[specialist, self.supervisor]):
-            # Specialist agent handles the issue
-            await specialist(
-                Msg(
-                    "System",
-                    f"Please handle this customer issue: {issue}",
-                    "user",
-                ),
+        try:
+            # 1. Routing
+            route_response = await self.router(
+                Msg("System", f"Analyze this issue: {issue}", "user"),
+                structured_model=RouteDecision,
             )
+            decision = route_response.metadata
+            category = decision.get("category", "general")
+            logger.info(f"Routed to category: {category}")
             
-            # Supervisor reviews and summarizes
-            final_response = await self.supervisor(
-                Msg(
-                    "System",
-                    "Please review the handling result and provide "
-                    "the final response.",
-                    "user",
-                ),
-                structured_model=ResolutionReport,
-            )
+            # 2. Select Specialist
+            specialist_map = {
+                "technical": self.tech_agent,
+                "order": self.order_agent,
+                "complaint": self.complaint_agent,
+                "general": self.tech_agent,
+            }
+            specialist = specialist_map.get(category, self.tech_agent)
+            
+            # 3. Collaborative Handling
+            async with MsgHub(participants=[specialist, self.supervisor]):
+                await specialist(Msg("System", f"Handle this issue: {issue}", "user"))
+                
+                final_response = await self.supervisor(
+                    Msg("System", "Review result and provide final response.", "user"),
+                    structured_model=ResolutionReport,
+                )
+                
             return final_response.get_text_content()
+            
+        except Exception as e:
+            logger.error(f"Error in handle_customer for {customer_id}: {e}")
+            return f"I apologize, but we encountered an error processing your request: {str(e)}"
 
 async def main() -> None:
-    """Run the complete multi-agent customer support system."""
-    # Set enable_human_review=True to enable manual review
-    system = CustomerSupportSystem(enable_human_review=False)
+    # Use gemini-1.5-flash as default, can be overridden by env
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+    system = CustomerSupportSystem(model_name=model_name, enable_human_review=False)
     
-    # Simulate multiple customer issues
     customer_issues = [
         ("C001", "Your app keeps crashing. I can't use it at all!"),
         ("C002", "Has my order 12345 shipped? When will it arrive?"),
-        (
-            "C003",
-            "I strongly protest! The product quality is terrible. "
-            "I demand a refund!",
-        ),
+        ("C003", "I strongly protest! The product quality is terrible. I demand a refund!"),
     ]
     
     for customer_id, issue in customer_issues:
-        try:
-            response = await system.handle_customer(customer_id, issue)
-            print(f"\n[Final Response]\n{response}")
-        except Exception as e:
-            print(f"Error handling customer {customer_id}: {e}")
-        print("\n" + "-" * 60)
+        print(f"\n--- Handling {customer_id} ---")
+        response = await system.handle_customer(customer_id, issue)
+        print(f"\n[Final Response]\n{response}")
+        print("-" * 30)
 
 if __name__ == "__main__":
     load_dotenv()
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("System interrupted by user.")
+    except Exception as e:
+        logger.critical(f"System failed: {e}")
