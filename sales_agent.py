@@ -4,12 +4,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 from agentscope.agent import AgentBase, ReActAgent, UserAgent
 from agentscope.formatter import (
-    DashScopeChatFormatter,
-    DashScopeMultiAgentFormatter,
+    GeminiChatFormatter,
+    GeminiMultiAgentFormatter,
 )
 from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg, TextBlock
-from agentscope.model import DashScopeChatModel
+from agentscope.model import GeminiChatModel
 from agentscope.pipeline import MsgHub
 from agentscope.tool import Toolkit, ToolResponse
 
@@ -117,14 +117,13 @@ class CustomerSupportSystem:
     """Multi-agent customer support system."""
     
     def __init__(self, enable_human_review: bool = False) -> None:
-        self.api_key = os.environ.get("DASHSCOPE_API_KEY")
+        self.api_key = os.environ.get("GOOGLE_API_KEY")
         if not self.api_key:
-            print("WARNING: DASHSCOPE_API_KEY not found in environment.")
+            print("WARNING: GOOGLE_API_KEY not found in environment.")
             
-        self.model = DashScopeChatModel(
-            model_name="qwen-max",
+        self.model = GeminiChatModel(
+            model_name="gemini-2.5-flash",
             api_key=self.api_key,
-            stream=True,
         )
         self.enable_human_review = enable_human_review
         
@@ -158,12 +157,11 @@ class CustomerSupportSystem:
             name="Router",
             sys_prompt="You are an intelligent routing system that analyzes "
                        "customer issues and classifies them.",
-            model=DashScopeChatModel(
-                model_name="qwen-max",
+            model=GeminiChatModel(
+                model_name="gemini-2.5-flash",
                 api_key=self.api_key,
-                stream=False,
             ),
-            formatter=DashScopeChatFormatter(),
+            formatter=GeminiChatFormatter(),
             memory=InMemoryMemory(),
             toolkit=Toolkit(),
         )
@@ -182,7 +180,7 @@ class CustomerSupportSystem:
             sys_prompt=f"You are a {specialty} specialist, professionally "
                        f"handling related issues.",
             model=self.model,
-            formatter=DashScopeMultiAgentFormatter(),
+            formatter=GeminiMultiAgentFormatter(),
             memory=InMemoryMemory(),
             toolkit=toolkit,
         )
@@ -194,7 +192,7 @@ class CustomerSupportSystem:
             sys_prompt="You are a customer service supervisor, responsible "
                        "for monitoring service quality and summarizing results.",
             model=self.model,
-            formatter=DashScopeMultiAgentFormatter(),
+            formatter=GeminiMultiAgentFormatter(),
             memory=InMemoryMemory(),
             toolkit=Toolkit(),
         )
