@@ -1,5 +1,6 @@
 import asyncio
 import os
+from dotenv import load_dotenv
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 from agentscope.agent import AgentBase, ReActAgent, UserAgent
@@ -275,4 +276,5 @@ async def main() -> None:
         print("\n" + "-" * 60)
 
 if __name__ == "__main__":
+    load_dotenv()
     asyncio.run(main())

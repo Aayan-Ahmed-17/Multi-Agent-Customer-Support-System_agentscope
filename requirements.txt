@@ -1,3 +1,4 @@
 agentscope
 pydantic
 google-generativeai
+python-dotenv
