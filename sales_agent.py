@@ -1,6 +1,7 @@
 import asyncio
 import os
 import logging
+import time
 from typing import Any, Literal, Dict, Optional
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -180,43 +181,53 @@ class CustomerSupportSystem:
             toolkit=Toolkit(),
         )
 
-    async def handle_customer(self, customer_id: str, issue: str) -> str:
-        """Process a customer issue through the multi-agent pipeline."""
+    async def handle_customer(self, customer_id: str, issue: str, max_retries: int = 3) -> str:
+        """Process a customer issue with automatic retries for server errors."""
         logger.info(f"Processing issue for {customer_id}: {issue}")
         
-        try:
-            # 1. Routing
-            route_response = await self.router(
-                Msg("System", f"Analyze this issue: {issue}", "user"),
-                structured_model=RouteDecision,
-            )
-            decision = route_response.metadata
-            category = decision.get("category", "general")
-            logger.info(f"Routed to category: {category}")
-            
-            # 2. Select Specialist
-            specialist_map = {
-                "technical": self.tech_agent,
-                "order": self.order_agent,
-                "complaint": self.complaint_agent,
-                "general": self.tech_agent,
-            }
-            specialist = specialist_map.get(category, self.tech_agent)
-            
-            # 3. Collaborative Handling
-            async with MsgHub(participants=[specialist, self.supervisor]):
-                await specialist(Msg("System", f"Handle this issue: {issue}", "user"))
-                
-                final_response = await self.supervisor(
-                    Msg("System", "Review result and provide final response.", "user"),
-                    structured_model=ResolutionReport,
+        last_error = ""
+        for attempt in range(max_retries):
+            try:
+                # 1. Routing
+                route_response = await self.router(
+                    Msg("System", f"Analyze this issue: {issue}", "user"),
+                    structured_model=RouteDecision,
                 )
+                decision = route_response.metadata
+                category = decision.get("category", "general")
+                logger.info(f"Routed to category: {category} (Attempt {attempt + 1})")
                 
-            return final_response.get_text_content()
-            
-        except Exception as e:
-            logger.error(f"Error in handle_customer for {customer_id}: {e}")
-            return f"I apologize, but we encountered an error processing your request: {str(e)}"
+                # 2. Select Specialist
+                specialist_map = {
+                    "technical": self.tech_agent,
+                    "order": self.order_agent,
+                    "complaint": self.complaint_agent,
+                    "general": self.tech_agent,
+                }
+                specialist = specialist_map.get(category, self.tech_agent)
+                
+                # 3. Collaborative Handling
+                async with MsgHub(participants=[specialist, self.supervisor]):
+                    await specialist(Msg("System", f"Handle this issue: {issue}", "user"))
+                    
+                    final_response = await self.supervisor(
+                        Msg("System", "Review result and provide final response.", "user"),
+                        structured_model=ResolutionReport,
+                    )
+                    
+                return final_response.get_text_content()
+                
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Attempt {attempt + 1} failed for {customer_id}: {last_error}")
+                if "503" in last_error or "429" in last_error or "400" in last_error:
+                    wait_time = (attempt + 1) * 15
+                    logger.info(f"Retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    break # Non-retryable error
+                    
+        return f"I apologize, but we encountered a persistent error: {last_error}"
 
 async def main() -> None:
     # Use gemini-1.5-flash as default, can be overridden by env
@@ -229,7 +240,11 @@ async def main() -> None:
         ("C003", "I strongly protest! The product quality is terrible. I demand a refund!"),
     ]
     
-    for customer_id, issue in customer_issues:
+    for i, (customer_id, issue) in enumerate(customer_issues):
+        if i > 0:
+            logger.info("Waiting 20 seconds to respect free tier rate limits...")
+            time.sleep(20)
+        
         print(f"\n--- Handling {customer_id} ---")
         response = await system.handle_customer(customer_id, issue)
         print(f"\n[Final Response]\n{response}")
