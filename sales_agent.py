@@ -123,7 +123,7 @@ class CustomerSupportSystem:
             print("WARNING: GOOGLE_API_KEY not found in environment.")
             
         self.model = GeminiChatModel(
-            model_name="gemini-2.5-flash",
+            model_name="gemini-1.5-flash",
             api_key=self.api_key,
         )
         self.enable_human_review = enable_human_review
@@ -159,7 +159,7 @@ class CustomerSupportSystem:
             sys_prompt="You are an intelligent routing system that analyzes "
                        "customer issues and classifies them.",
             model=GeminiChatModel(
-                model_name="gemini-2.5-flash",
+                model_name="gemini-1.5-flash",
                 api_key=self.api_key,
             ),
             formatter=GeminiChatFormatter(),
